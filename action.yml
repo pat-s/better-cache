@@ -1,4 +1,4 @@
-name: 'better-cache'
+name: 'always-upload-cache'
 description: 'Fork of actions/cache which always saves cache'
 author: 'pat-s'
 inputs:
