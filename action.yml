@@ -1,6 +1,6 @@
 name: 'better-cache'
 description: 'Fork of actions/cache which always saves cache'
-author: 'GitHub'
+author: 'pat-s'
 inputs:
   path:
     description: 'A directory to store and save the cache'
