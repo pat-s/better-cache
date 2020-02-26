@@ -1,4 +1,4 @@
-name: 'Cache'
+name: 'better-cache'
 description: 'Fork of actions/cache which always saves cache'
 author: 'GitHub'
 inputs:
