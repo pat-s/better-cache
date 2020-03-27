@@ -1,5 +1,6 @@
 import * as core from "@actions/core";
 import * as path from "path";
+
 import * as cacheHttpClient from "./cacheHttpClient";
 import { Events, Inputs, State } from "./constants";
 import { extractTar } from "./tar";
@@ -18,11 +19,6 @@ async function run(): Promise<void> {
             );
             return;
         }
-
-        const cachePath = utils.resolvePath(
-            core.getInput(Inputs.Path, { required: true })
-        );
-        core.debug(`Cache Path: ${cachePath}`);
 
         const primaryKey = core.getInput(Inputs.Key, { required: true });
         core.saveState(State.CacheKey, primaryKey);
@@ -74,20 +70,29 @@ async function run(): Promise<void> {
             // Store the cache result
             utils.setCacheState(cacheEntry);
 
-            // Download the cache from the cache entry
-            await cacheHttpClient.downloadCache(
-                cacheEntry.archiveLocation,
-                archivePath
-            );
+            try {
+                // Download the cache from the cache entry
+                await cacheHttpClient.downloadCache(
+                    cacheEntry.archiveLocation,
+                    archivePath
+                );
 
-            const archiveFileSize = utils.getArchiveFileSize(archivePath);
-            core.info(
-                `Cache Size: ~${Math.round(
-                    archiveFileSize / (1024 * 1024)
-                )} MB (${archiveFileSize} B)`
-            );
+                const archiveFileSize = utils.getArchiveFileSize(archivePath);
+                core.info(
+                    `Cache Size: ~${Math.round(
+                        archiveFileSize / (1024 * 1024)
+                    )} MB (${archiveFileSize} B)`
+                );
 
-            await extractTar(archivePath, cachePath);
+                await extractTar(archivePath);
+            } finally {
+                // Try to delete the archive to save space
+                try {
+                    await utils.unlinkFile(archivePath);
+                } catch (error) {
+                    core.debug(`Failed to delete archive: ${error}`);
+                }
+            }
 
             const isExactKeyMatch = utils.isExactKeyMatch(
                 primaryKey,
