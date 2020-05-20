@@ -2,6 +2,7 @@
 
 - [Examples](#examples)
   - [C# - NuGet](#c---nuget)
+  - [D - DUB](#d---dub)
   - [Elixir - Mix](#elixir---mix)
   - [Go - Modules](#go---modules)
   - [Haskell - Cabal](#haskell---cabal)
@@ -11,13 +12,14 @@
     - [macOS and Ubuntu](#macos-and-ubuntu)
     - [Windows](#windows)
     - [Using multiple systems and `npm config`](#using-multiple-systems-and-npm-config)
-  - [Node - Yarn](#node---yarn)
   - [Node - Lerna](#node---lerna)
+  - [Node - Yarn](#node---yarn)
   - [OCaml/Reason - esy](#ocamlreason---esy)
   - [PHP - Composer](#php---composer)
   - [Python - pip](#python---pip)
     - [Simple example](#simple-example)
     - [Multiple OS's in a workflow](#multiple-oss-in-a-workflow)
+    - [Using pip to get cache location](#using-pip-to-get-cache-location)
     - [Using a script to get cache location](#using-a-script-to-get-cache-location)
   - [R - renv](#r---renv)
     - [Simple example](#simple-example-1)
@@ -54,6 +56,30 @@ steps:
       key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json') }}
       restore-keys: |
         ${{ runner.os }}-nuget-
+```
+
+## D - DUB
+
+### POSIX
+
+```yaml
+- uses: actions/cache@v1
+  with:
+    path: ~/.dub
+    key: ${{ runner.os }}-dub-${{ hashFiles('**/dub.json') }}
+    restore-keys: |
+      ${{ runner.os }}-dub-
+```
+
+### Windows
+
+```yaml
+- uses: actions/cache@v1
+  with:
+    path: ~\AppData\Local\dub
+    key: ${{ runner.os }}-dub-${{ hashFiles('**/dub.json') }}
+    restore-keys: |
+      ${{ runner.os }}-dub-
 ```
 
 ## Elixir - Mix
@@ -168,6 +194,19 @@ For npm, cache files are stored in `~/.npm` on Posix, or `%AppData%/npm-cache` o
       ${{ runner.os }}-node-
 ```
 
+## Node - Lerna
+
+>Note this example uses the new multi-paths feature and is only available at `master`
+```yaml
+- name: restore lerna
+  uses: actions/cache@master
+  with:
+    path: |
+      node_modules
+      */*/node_modules
+    key: ${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}
+```
+
 ## Node - Yarn
 The yarn cache directory will depend on your operating system and version of `yarn`. See https://yarnpkg.com/lang/en/docs/cli/cache/ for more info.
 
@@ -183,18 +222,6 @@ The yarn cache directory will depend on your operating system and version of `ya
     key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
     restore-keys: |
       ${{ runner.os }}-yarn-
-```
-
-## Node - Lerna
-
-```yaml
-- name: restore lerna
-  uses: actions/cache@v2
-   with:
-     path: |
-       node_modules
-        */*/node_modules
-     key: ${{ runner.os }}-${{ hashFiles('yarn.lock') }}
 ```
 
 ## OCaml/Reason - esy
@@ -289,14 +316,32 @@ Replace `~/.cache/pip` with the correct `path` if not using Ubuntu.
       ${{ runner.os }}-pip-
 ```
 
+### Using pip to get cache location
+
+> Note: This requires pip 20.1+
+```yaml
+- name: Get pip cache dir
+  id: pip-cache
+  run: |
+    echo "::set-output name=dir::$(pip cache dir)"
+
+- name: pip cache
+  uses: actions/cache@v1
+  with:
+    path: ${{ steps.pip-cache.outputs.dir }}
+    key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+    restore-keys: |
+      ${{ runner.os }}-pip-
+```
+
 ### Using a script to get cache location
 
 > Note: This uses an internal pip API and may not always work
 ```yaml
-- name: Get pip cache
-   id: pip-cache
-   run: |
-     python -c "from pip._internal.locations import USER_CACHE_DIR; print('::set-output name=dir::' + USER_CACHE_DIR)"
+- name: Get pip cache dir
+ id: pip-cache
+ run: |
+   python -c "from pip._internal.locations import USER_CACHE_DIR; print('::set-output name=dir::' + USER_CACHE_DIR)"
 
 - uses: actions/cache@v1
   with:

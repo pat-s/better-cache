@@ -2,7 +2,13 @@ import * as core from "@actions/core";
 import * as path from "path";
 
 import * as cacheHttpClient from "../src/cacheHttpClient";
-import { CacheFilename, Events, Inputs } from "../src/constants";
+import {
+    CacheFilename,
+    CompressionMethod,
+    Events,
+    Inputs,
+    RefKey
+} from "../src/constants";
 import { ArtifactCacheEntry } from "../src/contracts";
 import run from "../src/save";
 import * as tar from "../src/tar";
@@ -36,11 +42,6 @@ beforeAll(() => {
         return actualUtils.isValidEvent();
     });
 
-    jest.spyOn(actionUtils, "getSupportedEvents").mockImplementation(() => {
-        const actualUtils = jest.requireActual("../src/utils/actionUtils");
-        return actualUtils.getSupportedEvents();
-    });
-
     jest.spyOn(actionUtils, "resolvePaths").mockImplementation(
         async filePaths => {
             return filePaths.map(x => path.resolve(x));
@@ -50,15 +51,22 @@ beforeAll(() => {
     jest.spyOn(actionUtils, "createTempDirectory").mockImplementation(() => {
         return Promise.resolve("/foo/bar");
     });
+
+    jest.spyOn(actionUtils, "getCacheFileName").mockImplementation(cm => {
+        const actualUtils = jest.requireActual("../src/utils/actionUtils");
+        return actualUtils.getCacheFileName(cm);
+    });
 });
 
 beforeEach(() => {
     process.env[Events.Key] = Events.Push;
+    process.env[RefKey] = "refs/heads/feature-branch";
 });
 
 afterEach(() => {
     testUtils.clearInputs();
     delete process.env[Events.Key];
+    delete process.env[RefKey];
 });
 
 test("save with invalid event outputs warning", async () => {
@@ -66,9 +74,10 @@ test("save with invalid event outputs warning", async () => {
     const failedMock = jest.spyOn(core, "setFailed");
     const invalidEvent = "commit_comment";
     process.env[Events.Key] = invalidEvent;
+    delete process.env[RefKey];
     await run();
     expect(logWarningMock).toHaveBeenCalledWith(
-        `Event Validation Error: The event type ${invalidEvent} is not supported. Only push, pull_request events are supported at this time.`
+        `Event Validation Error: The event type ${invalidEvent} is not supported because it's not tied to a branch or tag ref.`
     );
     expect(failedMock).toHaveBeenCalledTimes(0);
 });
@@ -201,20 +210,27 @@ test("save with large cache outputs warning", async () => {
     jest.spyOn(actionUtils, "getArchiveFileSize").mockImplementationOnce(() => {
         return cacheSize;
     });
+    const compression = CompressionMethod.Gzip;
+    const getCompressionMock = jest
+        .spyOn(actionUtils, "getCompressionMethod")
+        .mockReturnValue(Promise.resolve(compression));
 
     await run();
 
     const archiveFolder = "/foo/bar";
 
     expect(createTarMock).toHaveBeenCalledTimes(1);
-    expect(createTarMock).toHaveBeenCalledWith(archiveFolder, cachePaths);
-
+    expect(createTarMock).toHaveBeenCalledWith(
+        archiveFolder,
+        cachePaths,
+        compression
+    );
     expect(logWarningMock).toHaveBeenCalledTimes(1);
     expect(logWarningMock).toHaveBeenCalledWith(
         "Cache size of ~6144 MB (6442450944 B) is over the 5GB limit, not saving cache."
     );
-
     expect(failedMock).toHaveBeenCalledTimes(0);
+    expect(getCompressionMock).toHaveBeenCalledTimes(1);
 });
 
 test("save with reserve cache failure outputs warning", async () => {
@@ -250,13 +266,18 @@ test("save with reserve cache failure outputs warning", async () => {
         });
 
     const createTarMock = jest.spyOn(tar, "createTar");
-
     const saveCacheMock = jest.spyOn(cacheHttpClient, "saveCache");
+    const compression = CompressionMethod.Zstd;
+    const getCompressionMock = jest
+        .spyOn(actionUtils, "getCompressionMethod")
+        .mockReturnValue(Promise.resolve(compression));
 
     await run();
 
     expect(reserveCacheMock).toHaveBeenCalledTimes(1);
-    expect(reserveCacheMock).toHaveBeenCalledWith(primaryKey);
+    expect(reserveCacheMock).toHaveBeenCalledWith(primaryKey, {
+        compressionMethod: compression
+    });
 
     expect(infoMock).toHaveBeenCalledWith(
         `Unable to reserve cache with key ${primaryKey}, another job may be creating this cache.`
@@ -266,6 +287,7 @@ test("save with reserve cache failure outputs warning", async () => {
     expect(saveCacheMock).toHaveBeenCalledTimes(0);
     expect(logWarningMock).toHaveBeenCalledTimes(0);
     expect(failedMock).toHaveBeenCalledTimes(0);
+    expect(getCompressionMock).toHaveBeenCalledTimes(1);
 });
 
 test("save with server error outputs warning", async () => {
@@ -308,17 +330,27 @@ test("save with server error outputs warning", async () => {
         .mockImplementationOnce(() => {
             throw new Error("HTTP Error Occurred");
         });
+    const compression = CompressionMethod.Zstd;
+    const getCompressionMock = jest
+        .spyOn(actionUtils, "getCompressionMethod")
+        .mockReturnValue(Promise.resolve(compression));
 
     await run();
 
     expect(reserveCacheMock).toHaveBeenCalledTimes(1);
-    expect(reserveCacheMock).toHaveBeenCalledWith(primaryKey);
+    expect(reserveCacheMock).toHaveBeenCalledWith(primaryKey, {
+        compressionMethod: compression
+    });
 
     const archiveFolder = "/foo/bar";
-    const archiveFile = path.join(archiveFolder, CacheFilename);
+    const archiveFile = path.join(archiveFolder, CacheFilename.Zstd);
 
     expect(createTarMock).toHaveBeenCalledTimes(1);
-    expect(createTarMock).toHaveBeenCalledWith(archiveFolder, cachePaths);
+    expect(createTarMock).toHaveBeenCalledWith(
+        archiveFolder,
+        cachePaths,
+        compression
+    );
 
     expect(saveCacheMock).toHaveBeenCalledTimes(1);
     expect(saveCacheMock).toHaveBeenCalledWith(cacheId, archiveFile);
@@ -327,6 +359,7 @@ test("save with server error outputs warning", async () => {
     expect(logWarningMock).toHaveBeenCalledWith("HTTP Error Occurred");
 
     expect(failedMock).toHaveBeenCalledTimes(0);
+    expect(getCompressionMock).toHaveBeenCalledTimes(1);
 });
 
 test("save with valid inputs uploads a cache", async () => {
@@ -364,20 +397,31 @@ test("save with valid inputs uploads a cache", async () => {
     const createTarMock = jest.spyOn(tar, "createTar");
 
     const saveCacheMock = jest.spyOn(cacheHttpClient, "saveCache");
+    const compression = CompressionMethod.Zstd;
+    const getCompressionMock = jest
+        .spyOn(actionUtils, "getCompressionMethod")
+        .mockReturnValue(Promise.resolve(compression));
 
     await run();
 
     expect(reserveCacheMock).toHaveBeenCalledTimes(1);
-    expect(reserveCacheMock).toHaveBeenCalledWith(primaryKey);
+    expect(reserveCacheMock).toHaveBeenCalledWith(primaryKey, {
+        compressionMethod: compression
+    });
 
     const archiveFolder = "/foo/bar";
-    const archiveFile = path.join(archiveFolder, CacheFilename);
+    const archiveFile = path.join(archiveFolder, CacheFilename.Zstd);
 
     expect(createTarMock).toHaveBeenCalledTimes(1);
-    expect(createTarMock).toHaveBeenCalledWith(archiveFolder, cachePaths);
+    expect(createTarMock).toHaveBeenCalledWith(
+        archiveFolder,
+        cachePaths,
+        compression
+    );
 
     expect(saveCacheMock).toHaveBeenCalledTimes(1);
     expect(saveCacheMock).toHaveBeenCalledWith(cacheId, archiveFile);
 
     expect(failedMock).toHaveBeenCalledTimes(0);
+    expect(getCompressionMock).toHaveBeenCalledTimes(1);
 });

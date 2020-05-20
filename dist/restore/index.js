@@ -2182,18 +2182,26 @@ var __importStar = (this && this.__importStar) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const core = __importStar(__webpack_require__(470));
-const fs = __importStar(__webpack_require__(747));
-const crypto = __importStar(__webpack_require__(417));
 const http_client_1 = __webpack_require__(539);
 const auth_1 = __webpack_require__(226);
-const utils = __importStar(__webpack_require__(443));
+const crypto = __importStar(__webpack_require__(417));
+const fs = __importStar(__webpack_require__(747));
+const stream = __importStar(__webpack_require__(794));
+const util = __importStar(__webpack_require__(669));
 const constants_1 = __webpack_require__(694);
+const utils = __importStar(__webpack_require__(443));
 const versionSalt = "1.0";
 function isSuccessStatusCode(statusCode) {
     if (!statusCode) {
         return false;
     }
     return statusCode >= 200 && statusCode < 300;
+}
+function isServerErrorStatusCode(statusCode) {
+    if (!statusCode) {
+        return true;
+    }
+    return statusCode >= 500;
 }
 function isRetryableStatusCode(statusCode) {
     if (!statusCode) {
@@ -2234,25 +2242,67 @@ function createHttpClient() {
     const bearerCredentialHandler = new auth_1.BearerCredentialHandler(token);
     return new http_client_1.HttpClient("actions/cache", [bearerCredentialHandler], getRequestOptions());
 }
-function getCacheVersion() {
+function getCacheVersion(compressionMethod) {
+    const components = [core.getInput(constants_1.Inputs.Path, { required: true })].concat(compressionMethod == constants_1.CompressionMethod.Zstd ? [compressionMethod] : []);
     // Add salt to cache version to support breaking changes in cache entry
-    const components = [
-        core.getInput(constants_1.Inputs.Path, { required: true }),
-        versionSalt
-    ];
+    components.push(versionSalt);
     return crypto
         .createHash("sha256")
         .update(components.join("|"))
         .digest("hex");
 }
 exports.getCacheVersion = getCacheVersion;
-function getCacheEntry(keys) {
-    var _a;
+function retry(name, method, getStatusCode, maxAttempts = 2) {
+    return __awaiter(this, void 0, void 0, function* () {
+        let response = undefined;
+        let statusCode = undefined;
+        let isRetryable = false;
+        let errorMessage = "";
+        let attempt = 1;
+        while (attempt <= maxAttempts) {
+            try {
+                response = yield method();
+                statusCode = getStatusCode(response);
+                if (!isServerErrorStatusCode(statusCode)) {
+                    return response;
+                }
+                isRetryable = isRetryableStatusCode(statusCode);
+                errorMessage = `Cache service responded with ${statusCode}`;
+            }
+            catch (error) {
+                isRetryable = true;
+                errorMessage = error.message;
+            }
+            core.debug(`${name} - Attempt ${attempt} of ${maxAttempts} failed with error: ${errorMessage}`);
+            if (!isRetryable) {
+                core.debug(`${name} - Error is not retryable`);
+                break;
+            }
+            attempt++;
+        }
+        throw Error(`${name} failed: ${errorMessage}`);
+    });
+}
+exports.retry = retry;
+function retryTypedResponse(name, method, maxAttempts = 2) {
+    return __awaiter(this, void 0, void 0, function* () {
+        return yield retry(name, method, (response) => response.statusCode, maxAttempts);
+    });
+}
+exports.retryTypedResponse = retryTypedResponse;
+function retryHttpClientResponse(name, method, maxAttempts = 2) {
+    return __awaiter(this, void 0, void 0, function* () {
+        return yield retry(name, method, (response) => response.message.statusCode, maxAttempts);
+    });
+}
+exports.retryHttpClientResponse = retryHttpClientResponse;
+function getCacheEntry(keys, options) {
+    var _a, _b;
     return __awaiter(this, void 0, void 0, function* () {
         const httpClient = createHttpClient();
-        const version = getCacheVersion();
+        const version = getCacheVersion((_a = options) === null || _a === void 0 ? void 0 : _a.compressionMethod);
         const resource = `cache?keys=${encodeURIComponent(keys.join(","))}&version=${version}`;
-        const response = yield httpClient.getJson(getCacheApiUrl(resource));
+        const response = yield retryTypedResponse("getCacheEntry", () => httpClient.getJson(getCacheApiUrl(resource)));
         if (response.statusCode === 204) {
             return null;
         }
@@ -2260,7 +2310,7 @@ function getCacheEntry(keys) {
             throw new Error(`Cache service responded with ${response.statusCode}`);
         }
         const cacheResult = response.result;
-        const cacheDownloadUrl = (_a = cacheResult) === null || _a === void 0 ? void 0 : _a.archiveLocation;
+        const cacheDownloadUrl = (_b = cacheResult) === null || _b === void 0 ? void 0 : _b.archiveLocation;
         if (!cacheDownloadUrl) {
             throw new Error("Cache not found.");
         }
@@ -2271,36 +2321,50 @@ function getCacheEntry(keys) {
     });
 }
 exports.getCacheEntry = getCacheEntry;
-function pipeResponseToStream(response, stream) {
+function pipeResponseToStream(response, output) {
     return __awaiter(this, void 0, void 0, function* () {
-        return new Promise(resolve => {
-            response.message.pipe(stream).on("close", () => {
-                resolve();
-            });
-        });
+        const pipeline = util.promisify(stream.pipeline);
+        yield pipeline(response.message, output);
     });
 }
 function downloadCache(archiveLocation, archivePath) {
     return __awaiter(this, void 0, void 0, function* () {
         const stream = fs.createWriteStream(archivePath);
         const httpClient = new http_client_1.HttpClient("actions/cache");
-        const downloadResponse = yield httpClient.get(archiveLocation);
+        const downloadResponse = yield retryHttpClientResponse("downloadCache", () => httpClient.get(archiveLocation));
+        // Abort download if no traffic received over the socket.
+        downloadResponse.message.socket.setTimeout(constants_1.SocketTimeout, () => {
+            downloadResponse.message.destroy();
+            core.debug(`Aborting download, socket timed out after ${constants_1.SocketTimeout} ms`);
+        });
         yield pipeResponseToStream(downloadResponse, stream);
+        // Validate download size.
+        const contentLengthHeader = downloadResponse.message.headers["content-length"];
+        if (contentLengthHeader) {
+            const expectedLength = parseInt(contentLengthHeader);
+            const actualLength = utils.getArchiveFileSize(archivePath);
+            if (actualLength != expectedLength) {
+                throw new Error(`Incomplete download. Expected file size: ${expectedLength}, actual file size: ${actualLength}`);
+            }
+        }
+        else {
+            core.debug("Unable to validate download, no Content-Length header");
+        }
     });
 }
 exports.downloadCache = downloadCache;
 // Reserve Cache
-function reserveCache(key) {
-    var _a, _b, _c;
+function reserveCache(key, options) {
+    var _a, _b, _c, _d;
     return __awaiter(this, void 0, void 0, function* () {
         const httpClient = createHttpClient();
-        const version = getCacheVersion();
+        const version = getCacheVersion((_a = options) === null || _a === void 0 ? void 0 : _a.compressionMethod);
         const reserveCacheRequest = {
             key,
             version
         };
-        const response = yield httpClient.postJson(getCacheApiUrl("caches"), reserveCacheRequest);
-        return _c = (_b = (_a = response) === null || _a === void 0 ? void 0 : _a.result) === null || _b === void 0 ? void 0 : _b.cacheId, (_c !== null && _c !== void 0 ? _c : -1);
+        const response = yield retryTypedResponse("reserveCache", () => httpClient.postJson(getCacheApiUrl("caches"), reserveCacheRequest));
+        return _d = (_c = (_b = response) === null || _b === void 0 ? void 0 : _b.result) === null || _c === void 0 ? void 0 : _c.cacheId, (_d !== null && _d !== void 0 ? _d : -1);
     });
 }
 exports.reserveCache = reserveCache;
@@ -2312,7 +2376,7 @@ function getContentRange(start, end) {
     // Content-Range: bytes 0-199/*
     return `bytes ${start}-${end}/*`;
 }
-function uploadChunk(httpClient, resourceUrl, data, start, end) {
+function uploadChunk(httpClient, resourceUrl, openStream, start, end) {
     return __awaiter(this, void 0, void 0, function* () {
         core.debug(`Uploading chunk of size ${end -
             start +
@@ -2321,21 +2385,7 @@ function uploadChunk(httpClient, resourceUrl, data, start, end) {
             "Content-Type": "application/octet-stream",
             "Content-Range": getContentRange(start, end)
         };
-        const uploadChunkRequest = () => __awaiter(this, void 0, void 0, function* () {
-            return yield httpClient.sendStream("PATCH", resourceUrl, data, additionalHeaders);
-        });
-        const response = yield uploadChunkRequest();
-        if (isSuccessStatusCode(response.message.statusCode)) {
-            return;
-        }
-        if (isRetryableStatusCode(response.message.statusCode)) {
-            core.debug(`Received ${response.message.statusCode}, retrying chunk at offset ${start}.`);
-            const retryResponse = yield uploadChunkRequest();
-            if (isSuccessStatusCode(retryResponse.message.statusCode)) {
-                return;
-            }
-        }
-        throw new Error(`Cache service responded with ${response.message.statusCode} during chunk upload.`);
+        yield retryHttpClientResponse(`uploadChunk (start: ${start}, end: ${end})`, () => httpClient.sendStream("PATCH", resourceUrl, openStream(), additionalHeaders));
     });
 }
 function parseEnvNumber(key) {
@@ -2365,13 +2415,16 @@ function uploadFile(httpClient, cacheId, archivePath) {
                     const start = offset;
                     const end = offset + chunkSize - 1;
                     offset += MAX_CHUNK_SIZE;
-                    const chunk = fs.createReadStream(archivePath, {
+                    yield uploadChunk(httpClient, resourceUrl, () => fs
+                        .createReadStream(archivePath, {
                         fd,
                         start,
                         end,
                         autoClose: false
-                    });
-                    yield uploadChunk(httpClient, resourceUrl, chunk, start, end);
+                    })
+                        .on("error", error => {
+                        throw new Error(`Cache upload failed because file read failed with ${error.Message}`);
+                    }), start, end);
                 }
             })));
         }
@@ -2384,7 +2437,7 @@ function uploadFile(httpClient, cacheId, archivePath) {
 function commitCache(httpClient, cacheId, filesize) {
     return __awaiter(this, void 0, void 0, function* () {
         const commitCacheRequest = { size: filesize };
-        return yield httpClient.postJson(getCacheApiUrl(`caches/${cacheId.toString()}`), commitCacheRequest);
+        return yield retryTypedResponse("commitCache", () => httpClient.postJson(getCacheApiUrl(`caches/${cacheId.toString()}`), commitCacheRequest));
     });
 }
 function saveCache(cacheId, archivePath) {
@@ -2426,7 +2479,9 @@ class BasicCredentialHandler {
         this.password = password;
     }
     prepareRequest(options) {
-        options.headers['Authorization'] = 'Basic ' + Buffer.from(this.username + ':' + this.password).toString('base64');
+        options.headers['Authorization'] =
+            'Basic ' +
+                Buffer.from(this.username + ':' + this.password).toString('base64');
     }
     // This handler cannot handle 401
     canHandleAuthentication(response) {
@@ -2462,7 +2517,8 @@ class PersonalAccessTokenCredentialHandler {
     // currently implements pre-authorization
     // TODO: support preAuth = false where it hooks on 401
     prepareRequest(options) {
-        options.headers['Authorization'] = 'Basic ' + Buffer.from('PAT:' + this.token).toString('base64');
+        options.headers['Authorization'] =
+            'Basic ' + Buffer.from('PAT:' + this.token).toString('base64');
     }
     // This handler cannot handle 401
     canHandleAuthentication(response) {
@@ -3185,8 +3241,9 @@ var __importStar = (this && this.__importStar) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const core = __importStar(__webpack_require__(470));
-const io = __importStar(__webpack_require__(1));
+const exec = __importStar(__webpack_require__(986));
 const glob = __importStar(__webpack_require__(281));
+const io = __importStar(__webpack_require__(1));
 const fs = __importStar(__webpack_require__(747));
 const path = __importStar(__webpack_require__(622));
 const util = __importStar(__webpack_require__(669));
@@ -3288,22 +3345,60 @@ function resolvePaths(patterns) {
     });
 }
 exports.resolvePaths = resolvePaths;
-function getSupportedEvents() {
-    return [constants_1.Events.Push, constants_1.Events.PullRequest];
-}
-exports.getSupportedEvents = getSupportedEvents;
-// Currently the cache token is only authorized for push and pull_request events
-// All other events will fail when reading and saving the cache
+// Cache token authorized for all events that are tied to a ref
 // See GitHub Context https://help.github.com/actions/automating-your-workflow-with-github-actions/contexts-and-expression-syntax-for-github-actions#github-context
 function isValidEvent() {
-    const githubEvent = process.env[constants_1.Events.Key] || "";
-    return getSupportedEvents().includes(githubEvent);
+    return constants_1.RefKey in process.env && Boolean(process.env[constants_1.RefKey]);
 }
 exports.isValidEvent = isValidEvent;
 function unlinkFile(path) {
     return util.promisify(fs.unlink)(path);
 }
 exports.unlinkFile = unlinkFile;
+function getVersion(app) {
+    return __awaiter(this, void 0, void 0, function* () {
+        core.debug(`Checking ${app} --version`);
+        let versionOutput = "";
+        try {
+            yield exec.exec(`${app} --version`, [], {
+                ignoreReturnCode: true,
+                silent: true,
+                listeners: {
+                    stdout: (data) => (versionOutput += data.toString()),
+                    stderr: (data) => (versionOutput += data.toString())
+                }
+            });
+        }
+        catch (err) {
+            core.debug(err.message);
+        }
+        versionOutput = versionOutput.trim();
+        core.debug(versionOutput);
+        return versionOutput;
+    });
+}
+function getCompressionMethod() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const versionOutput = yield getVersion("zstd");
+        return versionOutput.toLowerCase().includes("zstd command line interface")
+            ? constants_1.CompressionMethod.Zstd
+            : constants_1.CompressionMethod.Gzip;
+    });
+}
+exports.getCompressionMethod = getCompressionMethod;
+function getCacheFileName(compressionMethod) {
+    return compressionMethod == constants_1.CompressionMethod.Zstd
+        ? constants_1.CacheFilename.Zstd
+        : constants_1.CacheFilename.Gzip;
+}
+exports.getCacheFileName = getCacheFileName;
+function useGnuTar() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const versionOutput = yield getVersion("tar");
+        return versionOutput.toLowerCase().includes("gnu tar");
+    });
+}
+exports.useGnuTar = useGnuTar;
 
 
 /***/ }),
@@ -3544,6 +3639,7 @@ var HttpCodes;
     HttpCodes[HttpCodes["RequestTimeout"] = 408] = "RequestTimeout";
     HttpCodes[HttpCodes["Conflict"] = 409] = "Conflict";
     HttpCodes[HttpCodes["Gone"] = 410] = "Gone";
+    HttpCodes[HttpCodes["TooManyRequests"] = 429] = "TooManyRequests";
     HttpCodes[HttpCodes["InternalServerError"] = 500] = "InternalServerError";
     HttpCodes[HttpCodes["NotImplemented"] = 501] = "NotImplemented";
     HttpCodes[HttpCodes["BadGateway"] = 502] = "BadGateway";
@@ -3568,8 +3664,18 @@ function getProxyUrl(serverUrl) {
     return proxyUrl ? proxyUrl.href : '';
 }
 exports.getProxyUrl = getProxyUrl;
-const HttpRedirectCodes = [HttpCodes.MovedPermanently, HttpCodes.ResourceMoved, HttpCodes.SeeOther, HttpCodes.TemporaryRedirect, HttpCodes.PermanentRedirect];
-const HttpResponseRetryCodes = [HttpCodes.BadGateway, HttpCodes.ServiceUnavailable, HttpCodes.GatewayTimeout];
+const HttpRedirectCodes = [
+    HttpCodes.MovedPermanently,
+    HttpCodes.ResourceMoved,
+    HttpCodes.SeeOther,
+    HttpCodes.TemporaryRedirect,
+    HttpCodes.PermanentRedirect
+];
+const HttpResponseRetryCodes = [
+    HttpCodes.BadGateway,
+    HttpCodes.ServiceUnavailable,
+    HttpCodes.GatewayTimeout
+];
 const RetryableHttpVerbs = ['OPTIONS', 'GET', 'DELETE', 'HEAD'];
 const ExponentialBackoffCeiling = 10;
 const ExponentialBackoffTimeSlice = 5;
@@ -3694,18 +3800,22 @@ class HttpClient {
      */
     async request(verb, requestUrl, data, headers) {
         if (this._disposed) {
-            throw new Error("Client has already been disposed.");
+            throw new Error('Client has already been disposed.');
         }
         let parsedUrl = url.parse(requestUrl);
         let info = this._prepareRequest(verb, parsedUrl, headers);
         // Only perform retries on reads since writes may not be idempotent.
-        let maxTries = (this._allowRetries && RetryableHttpVerbs.indexOf(verb) != -1) ? this._maxRetries + 1 : 1;
+        let maxTries = this._allowRetries && RetryableHttpVerbs.indexOf(verb) != -1
+            ? this._maxRetries + 1
+            : 1;
         let numTries = 0;
         let response;
         while (numTries < maxTries) {
             response = await this.requestRaw(info, data);
             // Check if it's an authentication challenge
-            if (response && response.message && response.message.statusCode === HttpCodes.Unauthorized) {
+            if (response &&
+                response.message &&
+                response.message.statusCode === HttpCodes.Unauthorized) {
                 let authenticationHandler;
                 for (let i = 0; i < this.handlers.length; i++) {
                     if (this.handlers[i].canHandleAuthentication(response)) {
@@ -3723,21 +3833,32 @@ class HttpClient {
                 }
             }
             let redirectsRemaining = this._maxRedirects;
-            while (HttpRedirectCodes.indexOf(response.message.statusCode) != -1
-                && this._allowRedirects
-                && redirectsRemaining > 0) {
-                const redirectUrl = response.message.headers["location"];
+            while (HttpRedirectCodes.indexOf(response.message.statusCode) != -1 &&
+                this._allowRedirects &&
+                redirectsRemaining > 0) {
+                const redirectUrl = response.message.headers['location'];
                 if (!redirectUrl) {
                     // if there's no location to redirect to, we won't
                     break;
                 }
                 let parsedRedirectUrl = url.parse(redirectUrl);
-                if (parsedUrl.protocol == 'https:' && parsedUrl.protocol != parsedRedirectUrl.protocol && !this._allowRedirectDowngrade) {
-                    throw new Error("Redirect from HTTPS to HTTP protocol. This downgrade is not allowed for security reasons. If you want to allow this behavior, set the allowRedirectDowngrade option to true.");
+                if (parsedUrl.protocol == 'https:' &&
+                    parsedUrl.protocol != parsedRedirectUrl.protocol &&
+                    !this._allowRedirectDowngrade) {
+                    throw new Error('Redirect from HTTPS to HTTP protocol. This downgrade is not allowed for security reasons. If you want to allow this behavior, set the allowRedirectDowngrade option to true.');
                 }
                 // we need to finish reading the response before reassigning response
                 // which will leak the open socket.
                 await response.readBody();
+                // strip authorization header if redirected to a different hostname
+                if (parsedRedirectUrl.hostname !== parsedUrl.hostname) {
+                    for (let header in headers) {
+                        // header names are case insensitive
+                        if (header.toLowerCase() === 'authorization') {
+                            delete headers[header];
+                        }
+                    }
+                }
                 // let's make the request with the new redirectUrl
                 info = this._prepareRequest(verb, parsedRedirectUrl, headers);
                 response = await this.requestRaw(info, data);
@@ -3788,8 +3909,8 @@ class HttpClient {
      */
     requestRawWithCallback(info, data, onResult) {
         let socket;
-        if (typeof (data) === 'string') {
-            info.options.headers["Content-Length"] = Buffer.byteLength(data, 'utf8');
+        if (typeof data === 'string') {
+            info.options.headers['Content-Length'] = Buffer.byteLength(data, 'utf8');
         }
         let callbackCalled = false;
         let handleResult = (err, res) => {
@@ -3802,7 +3923,7 @@ class HttpClient {
             let res = new HttpClientResponse(msg);
             handleResult(null, res);
         });
-        req.on('socket', (sock) => {
+        req.on('socket', sock => {
             socket = sock;
         });
         // If we ever get disconnected, we want the socket to timeout eventually
@@ -3817,10 +3938,10 @@ class HttpClient {
             // res should have headers
             handleResult(err, null);
         });
-        if (data && typeof (data) === 'string') {
+        if (data && typeof data === 'string') {
             req.write(data, 'utf8');
         }
-        if (data && typeof (data) !== 'string') {
+        if (data && typeof data !== 'string') {
             data.on('close', function () {
                 req.end();
             });
@@ -3847,31 +3968,34 @@ class HttpClient {
         const defaultPort = usingSsl ? 443 : 80;
         info.options = {};
         info.options.host = info.parsedUrl.hostname;
-        info.options.port = info.parsedUrl.port ? parseInt(info.parsedUrl.port) : defaultPort;
-        info.options.path = (info.parsedUrl.pathname || '') + (info.parsedUrl.search || '');
+        info.options.port = info.parsedUrl.port
+            ? parseInt(info.parsedUrl.port)
+            : defaultPort;
+        info.options.path =
+            (info.parsedUrl.pathname || '') + (info.parsedUrl.search || '');
         info.options.method = method;
         info.options.headers = this._mergeHeaders(headers);
         if (this.userAgent != null) {
-            info.options.headers["user-agent"] = this.userAgent;
+            info.options.headers['user-agent'] = this.userAgent;
         }
         info.options.agent = this._getAgent(info.parsedUrl);
         // gives handlers an opportunity to participate
         if (this.handlers) {
-            this.handlers.forEach((handler) => {
+            this.handlers.forEach(handler => {
                 handler.prepareRequest(info.options);
             });
         }
         return info;
     }
     _mergeHeaders(headers) {
-        const lowercaseKeys = obj => Object.keys(obj).reduce((c, k) => (c[k.toLowerCase()] = obj[k], c), {});
+        const lowercaseKeys = obj => Object.keys(obj).reduce((c, k) => ((c[k.toLowerCase()] = obj[k]), c), {});
         if (this.requestOptions && this.requestOptions.headers) {
             return Object.assign({}, lowercaseKeys(this.requestOptions.headers), lowercaseKeys(headers));
         }
         return lowercaseKeys(headers || {});
     }
     _getExistingOrDefaultHeader(additionalHeaders, header, _default) {
-        const lowercaseKeys = obj => Object.keys(obj).reduce((c, k) => (c[k.toLowerCase()] = obj[k], c), {});
+        const lowercaseKeys = obj => Object.keys(obj).reduce((c, k) => ((c[k.toLowerCase()] = obj[k]), c), {});
         let clientHeader;
         if (this.requestOptions && this.requestOptions.headers) {
             clientHeader = lowercaseKeys(this.requestOptions.headers)[header];
@@ -3909,7 +4033,7 @@ class HttpClient {
                     proxyAuth: proxyUrl.auth,
                     host: proxyUrl.hostname,
                     port: proxyUrl.port
-                },
+                }
             };
             let tunnelAgent;
             const overHttps = proxyUrl.protocol === 'https:';
@@ -3936,7 +4060,9 @@ class HttpClient {
             // we don't want to set NODE_TLS_REJECT_UNAUTHORIZED=0 since that will affect request for entire process
             // http.RequestOptions doesn't expose a way to modify RequestOptions.agent.options
             // we have to cast it to any and change it directly
-            agent.options = Object.assign(agent.options || {}, { rejectUnauthorized: false });
+            agent.options = Object.assign(agent.options || {}, {
+                rejectUnauthorized: false
+            });
         }
         return agent;
     }
@@ -3997,7 +4123,7 @@ class HttpClient {
                     msg = contents;
                 }
                 else {
-                    msg = "Failed request: (" + statusCode + ")";
+                    msg = 'Failed request: (' + statusCode + ')';
                 }
                 let err = new Error(msg);
                 // attach statusCode and body obj (if available) to the error object
@@ -4467,7 +4593,21 @@ var Events;
     Events["Push"] = "push";
     Events["PullRequest"] = "pull_request";
 })(Events = exports.Events || (exports.Events = {}));
-exports.CacheFilename = "cache.tgz";
+var CacheFilename;
+(function (CacheFilename) {
+    CacheFilename["Gzip"] = "cache.tgz";
+    CacheFilename["Zstd"] = "cache.tzst";
+})(CacheFilename = exports.CacheFilename || (exports.CacheFilename = {}));
+var CompressionMethod;
+(function (CompressionMethod) {
+    CompressionMethod["Gzip"] = "gzip";
+    CompressionMethod["Zstd"] = "zstd";
+})(CompressionMethod = exports.CompressionMethod || (exports.CompressionMethod = {}));
+// Socket timeout in milliseconds during download.  If no traffic is received
+// over the socket during this period, the socket is destroyed and the download
+// is aborted.
+exports.SocketTimeout = 5000;
+exports.RefKey = "GITHUB_REF";
 
 
 /***/ }),
@@ -4561,9 +4701,7 @@ function run() {
         try {
             // Validate inputs, this can cause task failure
             if (!utils.isValidEvent()) {
-                utils.logWarning(`Event Validation Error: The event type ${process.env[constants_1.Events.Key]} is not supported. Only ${utils
-                    .getSupportedEvents()
-                    .join(", ")} events are supported at this time.`);
+                utils.logWarning(`Event Validation Error: The event type ${process.env[constants_1.Events.Key]} is not supported because it's not tied to a branch or tag ref.`);
                 return;
             }
             const primaryKey = core.getInput(constants_1.Inputs.Key, { required: true });
@@ -4590,13 +4728,16 @@ function run() {
                     return;
                 }
             }
+            const compressionMethod = yield utils.getCompressionMethod();
             try {
-                const cacheEntry = yield cacheHttpClient.getCacheEntry(keys);
+                const cacheEntry = yield cacheHttpClient.getCacheEntry(keys, {
+                    compressionMethod: compressionMethod
+                });
                 if (!((_a = cacheEntry) === null || _a === void 0 ? void 0 : _a.archiveLocation)) {
                     core.info(`Cache not found for input keys: ${keys.join(", ")}`);
                     return;
                 }
-                const archivePath = path.join(yield utils.createTempDirectory(), "cache.tgz");
+                const archivePath = path.join(yield utils.createTempDirectory(), utils.getCacheFileName(compressionMethod));
                 core.debug(`Archive Path: ${archivePath}`);
                 // Store the cache result
                 utils.setCacheState(cacheEntry);
@@ -4605,7 +4746,7 @@ function run() {
                     yield cacheHttpClient.downloadCache(cacheEntry.archiveLocation, archivePath);
                     const archiveFileSize = utils.getArchiveFileSize(archivePath);
                     core.info(`Cache Size: ~${Math.round(archiveFileSize / (1024 * 1024))} MB (${archiveFileSize} B)`);
-                    yield tar_1.extractTar(archivePath);
+                    yield tar_1.extractTar(archivePath, compressionMethod);
                 }
                 finally {
                     // Try to delete the archive to save space
@@ -4633,6 +4774,13 @@ function run() {
 run();
 exports.default = run;
 
+
+/***/ }),
+
+/***/ 794:
+/***/ (function(module) {
+
+module.exports = require("stream");
 
 /***/ }),
 
@@ -4964,7 +5112,8 @@ const io = __importStar(__webpack_require__(1));
 const fs_1 = __webpack_require__(747);
 const path = __importStar(__webpack_require__(622));
 const constants_1 = __webpack_require__(694);
-function getTarPath() {
+const utils = __importStar(__webpack_require__(443));
+function getTarPath(args) {
     return __awaiter(this, void 0, void 0, function* () {
         // Explicitly use BSD Tar on Windows
         const IS_WINDOWS = process.platform === "win32";
@@ -4973,22 +5122,21 @@ function getTarPath() {
             if (fs_1.existsSync(systemTar)) {
                 return systemTar;
             }
+            else if (yield utils.useGnuTar()) {
+                args.push("--force-local");
+            }
         }
         return yield io.which("tar", true);
     });
 }
 function execTar(args, cwd) {
-    var _a, _b;
+    var _a;
     return __awaiter(this, void 0, void 0, function* () {
         try {
-            yield exec_1.exec(`"${yield getTarPath()}"`, args, { cwd: cwd });
+            yield exec_1.exec(`"${yield getTarPath(args)}"`, args, { cwd: cwd });
         }
         catch (error) {
-            const IS_WINDOWS = process.platform === "win32";
-            if (IS_WINDOWS) {
-                throw new Error(`Tar failed with error: ${(_a = error) === null || _a === void 0 ? void 0 : _a.message}. Ensure BSD tar is installed and on the PATH.`);
-            }
-            throw new Error(`Tar failed with error: ${(_b = error) === null || _b === void 0 ? void 0 : _b.message}`);
+            throw new Error(`Tar failed with error: ${(_a = error) === null || _a === void 0 ? void 0 : _a.message}`);
         }
     });
 }
@@ -4996,28 +5144,47 @@ function getWorkingDirectory() {
     var _a;
     return _a = process.env["GITHUB_WORKSPACE"], (_a !== null && _a !== void 0 ? _a : process.cwd());
 }
-function extractTar(archivePath) {
+function extractTar(archivePath, compressionMethod) {
     return __awaiter(this, void 0, void 0, function* () {
         // Create directory to extract tar into
         const workingDirectory = getWorkingDirectory();
         yield io.mkdirP(workingDirectory);
-        const args = ["-xz", "-f", archivePath, "-P", "-C", workingDirectory];
+        // --d: Decompress.
+        // --long=#: Enables long distance matching with # bits. Maximum is 30 (1GB) on 32-bit OS and 31 (2GB) on 64-bit.
+        // Using 30 here because we also support 32-bit self-hosted runners.
+        const args = [
+            ...(compressionMethod == constants_1.CompressionMethod.Zstd
+                ? ["--use-compress-program", "zstd -d --long=30"]
+                : ["-z"]),
+            "-xf",
+            archivePath.replace(new RegExp("\\" + path.sep, "g"), "/"),
+            "-P",
+            "-C",
+            workingDirectory.replace(new RegExp("\\" + path.sep, "g"), "/")
+        ];
         yield execTar(args);
     });
 }
 exports.extractTar = extractTar;
-function createTar(archiveFolder, sourceDirectories) {
+function createTar(archiveFolder, sourceDirectories, compressionMethod) {
     return __awaiter(this, void 0, void 0, function* () {
         // Write source directories to manifest.txt to avoid command length limits
         const manifestFilename = "manifest.txt";
+        const cacheFileName = utils.getCacheFileName(compressionMethod);
         fs_1.writeFileSync(path.join(archiveFolder, manifestFilename), sourceDirectories.join("\n"));
+        // -T#: Compress using # working thread. If # is 0, attempt to detect and use the number of physical CPU cores.
+        // --long=#: Enables long distance matching with # bits. Maximum is 30 (1GB) on 32-bit OS and 31 (2GB) on 64-bit.
+        // Using 30 here because we also support 32-bit self-hosted runners.
         const workingDirectory = getWorkingDirectory();
         const args = [
-            "-cz",
-            "-f",
-            constants_1.CacheFilename,
+            ...(compressionMethod == constants_1.CompressionMethod.Zstd
+                ? ["--use-compress-program", "zstd -T0 --long=30"]
+                : ["-z"]),
+            "-cf",
+            cacheFileName.replace(new RegExp("\\" + path.sep, "g"), "/"),
+            "-P",
             "-C",
-            workingDirectory,
+            workingDirectory.replace(new RegExp("\\" + path.sep, "g"), "/"),
             "--files-from",
             manifestFilename
         ];
@@ -5044,12 +5211,10 @@ function getProxyUrl(reqUrl) {
     }
     let proxyVar;
     if (usingSsl) {
-        proxyVar = process.env["https_proxy"] ||
-            process.env["HTTPS_PROXY"];
+        proxyVar = process.env['https_proxy'] || process.env['HTTPS_PROXY'];
     }
     else {
-        proxyVar = process.env["http_proxy"] ||
-            process.env["HTTP_PROXY"];
+        proxyVar = process.env['http_proxy'] || process.env['HTTP_PROXY'];
     }
     if (proxyVar) {
         proxyUrl = url.parse(proxyVar);
@@ -5061,7 +5226,7 @@ function checkBypass(reqUrl) {
     if (!reqUrl.hostname) {
         return false;
     }
-    let noProxy = process.env["no_proxy"] || process.env["NO_PROXY"] || '';
+    let noProxy = process.env['no_proxy'] || process.env['NO_PROXY'] || '';
     if (!noProxy) {
         return false;
     }
@@ -5082,7 +5247,10 @@ function checkBypass(reqUrl) {
         upperReqHosts.push(`${upperReqHosts[0]}:${reqPort}`);
     }
     // Compare request host against noproxy
-    for (let upperNoProxyItem of noProxy.split(',').map(x => x.trim().toUpperCase()).filter(x => x)) {
+    for (let upperNoProxyItem of noProxy
+        .split(',')
+        .map(x => x.trim().toUpperCase())
+        .filter(x => x)) {
         if (upperReqHosts.some(x => x === upperNoProxyItem)) {
             return true;
         }
