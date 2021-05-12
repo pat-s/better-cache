@@ -17,6 +17,24 @@ afterEach(() => {
     delete process.env[RefKey];
 });
 
+test("isGhes returns true if server url is not github.com", () => {
+    try {
+        process.env["GITHUB_SERVER_URL"] = "http://example.com";
+        expect(actionUtils.isGhes()).toBe(true);
+    } finally {
+        process.env["GITHUB_SERVER_URL"] = undefined;
+    }
+});
+
+test("isGhes returns true when server url is github.com", () => {
+    try {
+        process.env["GITHUB_SERVER_URL"] = "http://github.com";
+        expect(actionUtils.isGhes()).toBe(false);
+    } finally {
+        process.env["GITHUB_SERVER_URL"] = undefined;
+    }
+});
+
 test("isExactKeyMatch with undefined cache key returns false", () => {
     const key = "linux-rust";
     const cacheKey = undefined;
@@ -193,4 +211,24 @@ test("getInputAsArray handles different new lines correctly", () => {
 test("getInputAsArray handles empty lines correctly", () => {
     testUtils.setInput("foo", "\n\nbar\n\nbaz\n\n");
     expect(actionUtils.getInputAsArray("foo")).toEqual(["bar", "baz"]);
+});
+
+test("getInputAsInt returns undefined if input not set", () => {
+    expect(actionUtils.getInputAsInt("undefined")).toBeUndefined();
+});
+
+test("getInputAsInt returns value if input is valid", () => {
+    testUtils.setInput("foo", "8");
+    expect(actionUtils.getInputAsInt("foo")).toBe(8);
+});
+
+test("getInputAsInt returns undefined if input is invalid or NaN", () => {
+    testUtils.setInput("foo", "bar");
+    expect(actionUtils.getInputAsInt("foo")).toBeUndefined();
+});
+
+test("getInputAsInt throws if required and value missing", () => {
+    expect(() =>
+        actionUtils.getInputAsInt("undefined", { required: true })
+    ).toThrowError();
 });

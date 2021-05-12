@@ -14,16 +14,18 @@
     - [Using multiple systems and `npm config`](#using-multiple-systems-and-npm-config)
   - [Node - Lerna](#node---lerna)
   - [Node - Yarn](#node---yarn)
+  - [Node - Yarn 2](#node---yarn-2)
   - [OCaml/Reason - esy](#ocamlreason---esy)
   - [PHP - Composer](#php---composer)
   - [Python - pip](#python---pip)
     - [Simple example](#simple-example)
-    - [Multiple OS's in a workflow](#multiple-oss-in-a-workflow)
+    - [Multiple OSes in a workflow](#multiple-oss-in-a-workflow)
     - [Using pip to get cache location](#using-pip-to-get-cache-location)
     - [Using a script to get cache location](#using-a-script-to-get-cache-location)
+  - [Python - pipenv](#python---pipenv)
   - [R - renv](#r---renv)
     - [Simple example](#simple-example-1)
-    - [Multiple OS's in a workflow](#multiple-oss-in-a-workflow-1)
+    - [Multiple OSes in a workflow](#multiple-oss-in-a-workflow-1)
   - [Ruby - Bundler](#ruby---bundler)
   - [Rust - Cargo](#rust---cargo)
   - [Scala - SBT](#scala---sbt)
@@ -44,7 +46,7 @@ Using [NuGet lock files](https://docs.microsoft.com/nuget/consume-packages/packa
 ```
 
 Depending on the environment, huge packages might be pre-installed in the global cache folder.
-With `actions/cache@v2` you can now exclude unwanted packages with [exclude pattern](https://github.com/actions/toolkit/tree/master/packages/glob#exclude-patterns)
+With `actions/cache@v2` you can now exclude unwanted packages with [exclude pattern](https://github.com/actions/toolkit/tree/main/packages/glob#exclude-patterns)
 ```yaml
 - uses: actions/cache@v2
   with:
@@ -95,11 +97,14 @@ steps:
 ```
 
 ## Elixir - Mix
+
 ```yaml
 - uses: actions/cache@v2
   with:
-    path: deps
-    key: ${{ runner.os }}-mix-${{ hashFiles(format('{0}{1}', github.workspace, '/mix.lock')) }}
+    path: |
+      deps
+      _build
+    key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
     restore-keys: |
       ${{ runner.os }}-mix-
 ```
@@ -135,8 +140,10 @@ We cache the elements of the Cabal store separately, as the entirety of `~/.caba
 ```yaml
 - uses: actions/cache@v2
   with:
-    path: ~/.gradle/caches
-    key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
+    path: |
+      ~/.gradle/caches
+      ~/.gradle/wrapper
+    key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
     restore-keys: |
       ${{ runner.os }}-gradle-
 ```
@@ -191,12 +198,13 @@ If using `npm config` to retrieve the cache directory, ensure you run [actions/s
 
 ```yaml
 - name: Get npm cache directory
-  id: npm-cache
+  id: npm-cache-dir
   run: |
     echo "::set-output name=dir::$(npm config get cache)"
 - uses: actions/cache@v2
+  id: npm-cache # use this to check for `cache-hit` ==> if: steps.npm-cache.outputs.cache-hit != 'true'
   with:
-    path: ${{ steps.npm-cache.outputs.dir }}
+    path: ${{ steps.npm-cache-dir.outputs.dir }}
     key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
     restore-keys: |
       ${{ runner.os }}-node-
@@ -221,6 +229,24 @@ The yarn cache directory will depend on your operating system and version of `ya
 - name: Get yarn cache directory path
   id: yarn-cache-dir-path
   run: echo "::set-output name=dir::$(yarn cache dir)"
+
+- uses: actions/cache@v2
+  id: yarn-cache # use this to check for `cache-hit` (`steps.yarn-cache.outputs.cache-hit != 'true'`)
+  with:
+    path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
+    key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+    restore-keys: |
+      ${{ runner.os }}-yarn-
+```
+
+
+## Node - Yarn 2
+The yarn 2 cache directory will depend on your config. See https://yarnpkg.com/configuration/yarnrc#cacheFolder for more info.
+
+```yaml
+- name: Get yarn cache directory path
+  id: yarn-cache-dir-path
+  run: echo "::set-output name=dir::$(yarn config get cacheFolder)"
 
 - uses: actions/cache@v2
   id: yarn-cache # use this to check for `cache-hit` (`steps.yarn-cache.outputs.cache-hit != 'true'`)
@@ -323,6 +349,31 @@ Replace `~/.cache/pip` with the correct `path` if not using Ubuntu.
       ${{ runner.os }}-pip-
 ```
 
+### Multiple OS's in a workflow with a matrix
+
+``` yaml
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+        - os: ubuntu-latest
+          path: ~/.cache/pip
+        - os: macos-latest
+          path: ~/Library/Caches/pip
+        - os: windows-latest
+          path: ~\AppData\Local\pip\Cache
+    steps:
+    - uses: actions/cache@v2
+      with:
+        path: ${{ matrix.path }}
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+         ${{ runner.os }}-pip-
+```
+
 ### Using pip to get cache location
 
 > Note: This requires pip 20.1+
@@ -341,21 +392,15 @@ Replace `~/.cache/pip` with the correct `path` if not using Ubuntu.
       ${{ runner.os }}-pip-
 ```
 
-### Using a script to get cache location
+## Python - pipenv
 
-> Note: This uses an internal pip API and may not always work
 ```yaml
-- name: Get pip cache dir
- id: pip-cache
- run: |
-   python -c "from pip._internal.locations import USER_CACHE_DIR; print('::set-output name=dir::' + USER_CACHE_DIR)"
-
 - uses: actions/cache@v2
   with:
-    path: ${{ steps.pip-cache.outputs.dir }}
-    key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+    path: ~/.local/share/virtualenvs
+    key: ${{ runner.os }}-pipenv-${{ hashFiles('Pipfile.lock') }}
     restore-keys: |
-      ${{ runner.os }}-pip-
+      ${{ runner.os }}-pipenv-
 ```
 
 ## R - renv
@@ -409,21 +454,18 @@ Replace `~/.local/share/renv` with the correct `path` if not using Ubuntu.
 
 ## Ruby - Bundler
 
-```yaml
-- uses: actions/cache@v2
-  with:
-    path: vendor/bundle
-    key: ${{ runner.os }}-gems-${{ hashFiles('**/Gemfile.lock') }}
-    restore-keys: |
-      ${{ runner.os }}-gems-
-```
-When dependencies are installed later in the workflow, we must specify the same path for the bundler.
+Caching gems with Bundler correctly is not trivial and just using `actions/cache`
+is [not enough](https://github.com/ruby/setup-ruby#caching-bundle-install-manually).
+
+Instead, it is recommended to use `ruby/setup-ruby`'s
+[`bundler-cache: true` option](https://github.com/ruby/setup-ruby#caching-bundle-install-automatically)
+whenever possible:
 
 ```yaml
-- name: Bundle install
-  run: |
-    bundle config path vendor/bundle
-    bundle install --jobs 4 --retry 3
+- uses: ruby/setup-ruby@v1
+  with:
+    ruby-version: ...
+    bundler-cache: true
 ```
 
 ## Rust - Cargo

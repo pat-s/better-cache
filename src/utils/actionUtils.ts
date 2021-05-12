@@ -2,6 +2,13 @@ import * as core from "@actions/core";
 
 import { Outputs, RefKey, State } from "../constants";
 
+export function isGhes(): boolean {
+    const ghUrl = new URL(
+        process.env["GITHUB_SERVER_URL"] || "https://github.com"
+    );
+    return ghUrl.hostname.toUpperCase() !== "GITHUB.COM";
+}
+
 export function isExactKeyMatch(key: string, cacheKey?: string): boolean {
     return !!(
         cacheKey &&
@@ -55,4 +62,15 @@ export function getInputAsArray(
         .split("\n")
         .map(s => s.trim())
         .filter(x => x !== "");
+}
+
+export function getInputAsInt(
+    name: string,
+    options?: core.InputOptions
+): number | undefined {
+    const value = parseInt(core.getInput(name, options));
+    if (isNaN(value) || value < 0) {
+        return undefined;
+    }
+    return value;
 }

@@ -6,6 +6,11 @@ import * as utils from "./utils/actionUtils";
 
 async function run(): Promise<void> {
     try {
+        if (utils.isGhes()) {
+            utils.logWarning("Cache action is not supported on GHES");
+            return;
+        }
+
         if (!utils.isValidEvent()) {
             utils.logWarning(
                 `Event Validation Error: The event type ${
@@ -36,7 +41,10 @@ async function run(): Promise<void> {
         });
 
         try {
-            await cache.saveCache(cachePaths, primaryKey);
+            await cache.saveCache(cachePaths, primaryKey, {
+                uploadChunkSize: utils.getInputAsInt(Inputs.UploadChunkSize)
+            });
+            core.info(`Cache saved with key: ${primaryKey}`);
         } catch (error) {
             if (error.name === cache.ValidationError.name) {
                 throw error;
