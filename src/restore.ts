@@ -6,8 +6,7 @@ import * as utils from "./utils/actionUtils";
 
 async function run(): Promise<void> {
     try {
-        if (utils.isGhes()) {
-            utils.logWarning("Cache action is not supported on GHES");
+        if (!utils.isCacheFeatureAvailable()) {
             utils.setCacheHitOutput(false);
             return;
         }
