@@ -1,6 +1,7 @@
 # Examples
 
 - [C# - NuGet](#c---nuget)
+- [Clojure - Lein Deps](#clojure---lein-deps)
 - [D - DUB](#d---dub)
   - [POSIX](#posix)
   - [Windows](#windows)
@@ -9,6 +10,7 @@
   - [macOS](#macos)
   - [Windows](#windows-1)
 - [Elixir - Mix](#elixir---mix)
+- [Erlang - Rebar3](#erlang--rebar3)
 - [Go - Modules](#go---modules)
   - [Linux](#linux-1)
   - [macOS](#macos-1)
@@ -18,9 +20,6 @@
 - [Java - Gradle](#java---gradle)
 - [Java - Maven](#java---maven)
 - [Node - npm](#node---npm)
-  - [macOS and Ubuntu](#macos-and-ubuntu)
-  - [Windows](#windows-3)
-  - [Using multiple systems and `npm config`](#using-multiple-systems-and-npm-config)
 - [Node - Lerna](#node---lerna)
 - [Node - Yarn](#node---yarn)
 - [Node - Yarn 2](#node---yarn-2)
@@ -82,6 +81,19 @@ steps:
         ${{ runner.os }}-nuget-
 ```
 
+## Clojure - Lein Deps
+
+```yaml
+- name: Cache lein project dependencies
+  uses: actions/cache@v3
+  with:
+    path: ~/.m2/repository
+    key: ${{ runner.os }}-clojure-${{ hashFiles('**/project.clj') }}
+    restore-keys: |
+      ${{ runner.os }}-clojure
+```
+
+
 ## D - DUB
 
 ### POSIX
@@ -90,7 +102,7 @@ steps:
 - uses: actions/cache@v3
   with:
     path: ~/.dub
-    key: ${{ runner.os }}-dub-${{ hashFiles('**/dub.json') }}
+    key: ${{ runner.os }}-dub-${{ hashFiles('**/dub.selections.json') }}
     restore-keys: |
       ${{ runner.os }}-dub-
 ```
@@ -101,7 +113,7 @@ steps:
 - uses: actions/cache@v3
   with:
     path: ~\AppData\Local\dub
-    key: ${{ runner.os }}-dub-${{ hashFiles('**/dub.json') }}
+    key: ${{ runner.os }}-dub-${{ hashFiles('**/dub.selections.json') }}
     restore-keys: |
       ${{ runner.os }}-dub-
 ```
@@ -137,10 +149,9 @@ steps:
   with:
     path: |
       ~\.deno
-      %LocalAppData%\deno
+      ~\AppData\Local\deno
     key: ${{ runner.os }}-deno-${{ hashFiles('**/deps.ts') }}
 ```
-
 
 ## Elixir - Mix
 
@@ -153,6 +164,18 @@ steps:
     key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
     restore-keys: |
       ${{ runner.os }}-mix-
+```
+
+## Erlang - Rebar3
+```yaml
+- uses: actions/cache@v2
+  with:
+    path: |
+      ~/.cache/rebar3
+      _build
+    key: ${{ runner.os }}-erlang-${{ env.OTP_VERSION }}-${{ hashFiles('**/*rebar.lock') }}
+    restore-keys: |
+      ${{ runner.os }}-erlang-${{ env.OTP_VERSION }}-
 ```
 
 ## Go - Modules
@@ -214,11 +237,34 @@ We cache the elements of the Cabal store separately, as the entirety of `~/.caba
 
 ## Haskell - Stack
 
+### Linux or macOS
+
 ```yaml
 - uses: actions/cache@v3
   name: Cache ~/.stack
   with:
     path: ~/.stack
+    key: ${{ runner.os }}-stack-global-${{ hashFiles('stack.yaml') }}-${{ hashFiles('package.yaml') }}
+    restore-keys: |
+      ${{ runner.os }}-stack-global-
+- uses: actions/cache@v3
+  name: Cache .stack-work
+  with:
+    path: .stack-work
+    key: ${{ runner.os }}-stack-work-${{ hashFiles('stack.yaml') }}-${{ hashFiles('package.yaml') }}-${{ hashFiles('**/*.hs') }}
+    restore-keys: |
+      ${{ runner.os }}-stack-work-
+```
+
+### Windows
+
+```yaml
+- uses: actions/cache@v3
+  name: Cache %APPDATA%\stack %LOCALAPPDATA%\Programs\stack
+  with:
+    path: |
+      ~\AppData\Roaming\stack
+      ~\AppData\Local\Programs\stack    
     key: ${{ runner.os }}-stack-global-${{ hashFiles('stack.yaml') }}-${{ hashFiles('package.yaml') }}
     restore-keys: |
       ${{ runner.os }}-stack-global-
@@ -260,39 +306,11 @@ We cache the elements of the Cabal store separately, as the entirety of `~/.caba
 
 ## Node - npm
 
-For npm, cache files are stored in `~/.npm` on Posix, or `%AppData%/npm-cache` on Windows. See https://docs.npmjs.com/cli/cache#cache
+For npm, cache files are stored in `~/.npm` on Posix, or `~\AppData\npm-cache` on Windows, but it's possible to use `npm config get cache` to find the path on any platform. See [the npm docs](https://docs.npmjs.com/cli/cache#cache) for more details.
 
 If using `npm config` to retrieve the cache directory, ensure you run [actions/setup-node](https://github.com/actions/setup-node) first to ensure your `npm` version is correct.
 
 >Note: It is not recommended to cache `node_modules`, as it can break across Node versions and won't work with `npm ci`
-
-### macOS and Ubuntu
-
-```yaml
-- uses: actions/cache@v3
-  with:
-    path: ~/.npm
-    key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-    restore-keys: |
-      ${{ runner.os }}-node-
-```
-
-### Windows
-
-```yaml
-- name: Get npm cache directory
-  id: npm-cache
-  run: |
-    echo "::set-output name=dir::$(npm config get cache)"
-- uses: actions/cache@v3
-  with:
-    path: ${{ steps.npm-cache.outputs.dir }}
-    key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-    restore-keys: |
-      ${{ runner.os }}-node-
-```
-
-### Using multiple systems and `npm config`
 
 ```yaml
 - name: Get npm cache directory
@@ -314,7 +332,7 @@ If using `npm config` to retrieve the cache directory, ensure you run [actions/s
 - name: restore lerna
   uses: actions/cache@v3
   with:
-    path: **/node_modules
+    path: '**/node_modules'
     key: ${{ runner.os }}-${{ hashFiles('**/yarn.lock') }}
 ```
 

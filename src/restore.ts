@@ -29,39 +29,31 @@ async function run(): Promise<void> {
             required: true
         });
 
-        try {
-            const cacheKey = await cache.restoreCache(
-                cachePaths,
-                primaryKey,
-                restoreKeys
+        const cacheKey = await cache.restoreCache(
+            cachePaths,
+            primaryKey,
+            restoreKeys
+        );
+
+        if (!cacheKey) {
+            core.info(
+                `Cache not found for input keys: ${[
+                    primaryKey,
+                    ...restoreKeys
+                ].join(", ")}`
             );
-            if (!cacheKey) {
-                core.info(
-                    `Cache not found for input keys: ${[
-                        primaryKey,
-                        ...restoreKeys
-                    ].join(", ")}`
-                );
-                return;
-            }
 
-            // Store the matched cache key
-            utils.setCacheState(cacheKey);
-
-            const isExactKeyMatch = utils.isExactKeyMatch(primaryKey, cacheKey);
-            utils.setCacheHitOutput(isExactKeyMatch);
-
-            core.info(`Cache restored from key: ${cacheKey}`);
-        } catch (error) {
-            if (error.name === cache.ValidationError.name) {
-                throw error;
-            } else {
-                utils.logWarning(error.message);
-                utils.setCacheHitOutput(false);
-            }
+            return;
         }
-    } catch (error) {
-        core.setFailed(error.message);
+
+        // Store the matched cache key
+        utils.setCacheState(cacheKey);
+
+        const isExactKeyMatch = utils.isExactKeyMatch(primaryKey, cacheKey);
+        utils.setCacheHitOutput(isExactKeyMatch);
+        core.info(`Cache restored from key: ${cacheKey}`);
+    } catch (error: unknown) {
+        core.setFailed((error as Error).message);
     }
 }
 
